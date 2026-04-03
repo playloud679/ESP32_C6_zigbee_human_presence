@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "presence_led.c"
+        "zb_cli.c"
+        "zb_coordinator.c"
+        "zb_presence.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        console
+        led_strip
+        nvs_flash
+)
