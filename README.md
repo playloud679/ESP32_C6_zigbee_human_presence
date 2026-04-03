@@ -1,82 +1,154 @@
-# zigbee_presence_probe_c6
+# ESP32_C6_zigbee_human_presence
 
-Mini progetto ESP-IDF per validare il trigger Zigbee presenza su `ESP32-C6`
-prima di integrarlo nel firmware del display e-ink.
+Questo non e` un firmware applicativo. E` un backend minimale travestito da
+probe embedded.
 
-## Obiettivo
+L'`ESP32-C6` gira come coordinator Zigbee e osserva un solo problema: capire
+quando un sensore di presenza HU entra e esce dallo stato umano rilevato,
+senza il rumore di tutto il resto. Niente cloud. Niente display finale. Niente
+automazioni decorative. Solo rete, stato, log e un LED locale che dice la
+verita` se il software la conosce.
 
-Il probe fa tre cose:
+## Idea
 
-1. Avvia l'`ESP32-C6` come coordinator Zigbee.
-2. Accetta il join di un sensore presenza.
-3. Cerca un endpoint che esponga il cluster `Occupancy Sensing` (`0x0406`),
-   prova a fare bind + configure reporting e stampa a seriale i cambi di stato.
+Il sensore non va trattato come un device elegante che espone un modello ZCL
+pulito e ortodosso. Va trattato come un nodo che puo`:
 
-Non scarica Blynk e non aggiorna il display: serve solo a validare il trigger.
+- parlare standard quando gli conviene
+- parlare vendor quando gli conviene di piu`
+- cambiare `short_addr`
+- ignorare discovery ZDO mentre continua a trasmettere burst utili
 
-## Struttura
+Quindi il software non parte da "che specifica dichiara il device", ma da
+"qual e` la fonte di verita` piu` affidabile in questo istante".
 
-- `main/app_main.c`: bootstrap NVS + piattaforma Zigbee.
-- `main/zb_coordinator.c`: formazione rete, endpoint locale, segnali stack.
-- `main/zb_presence.c`: discovery endpoint, bind, configure reporting, log occupancy.
+In questo progetto la fonte di verita` e` questa, in ordine pratico:
 
-## Build
+1. burst reali `EF00`
+2. notifiche `IAS Zone`
+3. report standard `Occupancy`
+4. discovery e metadata, ma solo come contesto, non come verita` operativa
 
-Prerequisiti:
+## Modello mentale
 
-- `ESP-IDF` installato.
-- accesso Internet al primo build per scaricare `esp-zboss-lib` e `esp-zigbee-lib`.
+Il sistema ha tre piani distinti.
 
-Esempio:
+`Rete`
 
-```sh
-. "$HOME/esp/esp-idf/export.sh"
-cd zigbee_presence_probe_c6
-idf.py set-target esp32c6
-idf.py build
-idf.py -p /dev/cu.usbmodemXXXX flash monitor
-```
+Il coordinator forma o riapre la rete Zigbee, registra un endpoint locale e si
+mette in condizione di ricevere traffico che altrimenti lo stack scarterebbe.
 
-## Flusso atteso a seriale
+`Contesto device`
 
-Dopo il flash dovresti vedere:
+Il software mantiene in RAM un piccolo modello del sensore corrente:
+indirizzo corto, endpoint, tipo logico, cluster osservato, presenza del vendor
+cluster `0xEF00`, qualche metadato IAS.
 
-- formazione rete coordinator
-- `permit join`
-- `device announce`
-- ricerca endpoint
-- individuazione cluster `0x0406`
-- log tipo `OCCUPANCY ... state=PRESENT` o `state=CLEAR`
+Questo contesto e` persistito solo nella sua parte stabile. Non per comodita`,
+ma per non mentire a se stesso al reboot.
 
-## CLI seriale
+`Stato presenza`
 
-Il probe espone anche una piccola CLI con prompt `zb>`.
+`PRESENT` e `CLEAR` non sono configurazione. Sono runtime puro.
+Se li salvi, introduci memoria dove dovrebbe esserci osservazione.
+Appena fai questo errore il sistema puo` rialzarsi gia` in `PRESENT`,
+che e` esattamente la cosa che un sensore di presenza non deve mai inventare.
 
-Comandi utili:
+## Invarianti
 
-- `help`
-- `zb_status`
-- `zb_open 180`
-- `zb_close`
-- `zb_sensor`
-- `zb_discover 0x1234`
-- `zb_bind`
-- `zb_report`
-- `zb_factory_reset`
+Questo repo vive su poche regole dure.
 
-Uso tipico:
+- La presenza non si persiste.
+- La configurazione del sensore si puo` persistere.
+- I burst reali valgono piu` della discovery fallita.
+- Il bootstrap non deve generare traffico inutile che altera il sensore.
+- Il LED locale e` solo una vista dello stato interno, non una sorgente di stato.
 
-1. fai partire il coordinator
-2. apri la rete con `zb_open 180`
-3. fai joinare il sensore
-4. se serve, rilancia discovery manuale con `zb_discover 0xSHORT`
-5. forza `zb_bind` e `zb_report`
-6. osserva i log `OCCUPANCY ...`
+Se rompi una di queste regole, il progetto continua a compilare ma smette di
+essere affidabile.
 
-## Note
+## Perche` esiste l'endpoint locale
 
-- Il progetto usa un endpoint locale con cluster `Occupancy Sensing` lato client,
-  perche` l'SDK inoltra il `REPORT_ATTR` al callback solo se il cluster esiste
-  sul nostro endpoint.
-- Il sensore reale potrebbe richiedere ritocchi su `bind` o `configure reporting`
-  a seconda del vendor. Questo scaffold e` pensato per essere la base del test.
+Lo stack Zigbee inoltra certi callback solo se sul coordinator esiste davvero
+il cluster lato giusto. Per questo il probe registra un endpoint locale con i
+cluster client necessari.
+
+Non e` estetica architetturale. E` una tassa d'ingresso imposta dallo stack.
+Se non lo fai, il traffico puo` esistere in aria ma non esistere per il tuo
+software.
+
+## Il caso HU presence
+
+La milestone congelata in questo repo e` quella del sensore HU presence Zigbee.
+
+Le osservazioni importanti sono state queste:
+
+- i burst `EF00` arrivano davvero
+- il device puo` cambiare `short_addr`
+- `zb_discover` puo` fallire anche quando il sensore e` vivo
+- `PRESENT` e `CLEAR` si vedono bene solo se il software resta passivo e non
+  reinventa lo stato al boot
+
+Il backend ha quindi smesso di inseguire un device ideale e ha iniziato a
+seguire il traffico reale.
+
+## Persistenza: cosa si salva, cosa no
+
+Si salva:
+
+- `short_addr`
+- `endpoint`
+- `kind`
+- `cluster_id`
+- `has_vendor_cluster`
+- campi stabili del contesto IAS
+
+Non si salva:
+
+- `occupancy_known`
+- `occupied`
+- `zone_status`
+
+Questa separazione e` il cuore del progetto. Senza questa separazione il probe
+diventa un autore di fiction.
+
+## LED come strumento di debug
+
+Il LED onboard della `ESP32-C6-Zero` non e` un effetto UI. E` uno strumento di
+debug immediato.
+
+- `unknown` -> spento
+- `CLEAR` -> bianco
+- `PRESENT` -> viola
+
+La board e` stata verificata con mapping `RGB`, non `GRB`. Questo dettaglio
+sembra banale finche` non chiedi il viola e ottieni turchese. In quel momento
+capisci che l'hardware ti sta dicendo la verita` sul formato byte prima ancora
+dei log.
+
+Board reference: [Waveshare ESP32-C6-Zero](https://www.waveshare.com/wiki/ESP32-C6-Zero?srsltid=AfmBOopFxMjO_4ma8wf0lXDpBSiPipDySdWLvjq7NPo_uu-O3YDNXeze)
+
+## File che contano
+
+- `main/app_main.c`
+  bootstrap NVS, piattaforma Zigbee, avvio del task principale
+- `main/zb_coordinator.c`
+  rete, segnali dello stack, raw handler `EF00`, wiring dei callback Zigbee
+- `main/zb_presence.c`
+  modello del sensore, discovery, bind, parsing dei DP vendor, persistenza del
+  contesto, transizioni di stato
+- `main/presence_led.c`
+  traduzione dello stato software in feedback locale sul LED
+
+## Cosa non e`
+
+Non e` ancora il firmware del display e-ink.
+Non e` un prodotto finito.
+Non e` una libreria generica per qualunque sensore Zigbee.
+
+E` una base isolata, utile proprio perche` riduce il mondo a una sola domanda:
+
+"questo sensore sta dicendo che c'e` una persona, oppure no?"
+
+Finche` questa domanda non e` banale e affidabile qui, non ha senso integrarla
+nel resto.
