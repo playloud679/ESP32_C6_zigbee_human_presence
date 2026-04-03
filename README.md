@@ -1,154 +1,155 @@
 # ESP32_C6_zigbee_human_presence
 
-Questo non e` un firmware applicativo. E` un backend minimale travestito da
-probe embedded.
+This is not an application firmware. It is a minimal backend disguised as an
+embedded probe.
 
-L'`ESP32-C6` gira come coordinator Zigbee e osserva un solo problema: capire
-quando un sensore di presenza HU entra e esce dallo stato umano rilevato,
-senza il rumore di tutto il resto. Niente cloud. Niente display finale. Niente
-automazioni decorative. Solo rete, stato, log e un LED locale che dice la
-verita` se il software la conosce.
+The `ESP32-C6` runs as a Zigbee coordinator and observes one problem only:
+understanding when an HU presence sensor enters and leaves the human-detected
+state, without the noise of everything else. No cloud. No final display. No
+decorative automation. Just network, state, logs, and a local LED that tells
+the truth if the software knows it.
 
 ## Idea
 
-Il sensore non va trattato come un device elegante che espone un modello ZCL
-pulito e ortodosso. Va trattato come un nodo che puo`:
+The sensor should not be treated as an elegant device exposing a clean,
+orthodox ZCL model. It should be treated as a node that can:
 
-- parlare standard quando gli conviene
-- parlare vendor quando gli conviene di piu`
-- cambiare `short_addr`
-- ignorare discovery ZDO mentre continua a trasmettere burst utili
+- speak standard when it feels like it
+- speak vendor when that is more useful
+- change `short_addr`
+- ignore ZDO discovery while still transmitting useful bursts
 
-Quindi il software non parte da "che specifica dichiara il device", ma da
-"qual e` la fonte di verita` piu` affidabile in questo istante".
+So the software does not begin with "what spec does the device claim to
+implement", but with "what is the most reliable source of truth right now".
 
-In questo progetto la fonte di verita` e` questa, in ordine pratico:
+In this project the source of truth is, in practical order:
 
-1. burst reali `EF00`
-2. notifiche `IAS Zone`
-3. report standard `Occupancy`
-4. discovery e metadata, ma solo come contesto, non come verita` operativa
+1. real `EF00` bursts
+2. `IAS Zone` notifications
+3. standard `Occupancy` reports
+4. discovery and metadata, but only as context, not as operational truth
 
 ## Modello mentale
 
-Il sistema ha tre piani distinti.
+The system has three distinct layers.
 
 `Rete`
 
-Il coordinator forma o riapre la rete Zigbee, registra un endpoint locale e si
-mette in condizione di ricevere traffico che altrimenti lo stack scarterebbe.
+The coordinator forms or reopens the Zigbee network, registers a local
+endpoint, and puts itself in a position to receive traffic that the stack
+would otherwise discard.
 
 `Contesto device`
 
-Il software mantiene in RAM un piccolo modello del sensore corrente:
-indirizzo corto, endpoint, tipo logico, cluster osservato, presenza del vendor
-cluster `0xEF00`, qualche metadato IAS.
+The software keeps a small in-memory model of the current sensor: short
+address, endpoint, logical type, observed cluster, presence of vendor cluster
+`0xEF00`, and a few IAS metadata fields.
 
-Questo contesto e` persistito solo nella sua parte stabile. Non per comodita`,
-ma per non mentire a se stesso al reboot.
+This context is persisted only in its stable part. Not for convenience, but to
+avoid lying to itself after a reboot.
 
 `Stato presenza`
 
-`PRESENT` e `CLEAR` non sono configurazione. Sono runtime puro.
-Se li salvi, introduci memoria dove dovrebbe esserci osservazione.
-Appena fai questo errore il sistema puo` rialzarsi gia` in `PRESENT`,
-che e` esattamente la cosa che un sensore di presenza non deve mai inventare.
+`PRESENT` and `CLEAR` are not configuration. They are pure runtime.
+If you persist them, you introduce memory where there should be observation.
+As soon as you make that mistake, the system can come back already in
+`PRESENT`, which is exactly the thing a presence sensor must never invent.
 
-## Invarianti
+## Invariants
 
-Questo repo vive su poche regole dure.
+This repo lives on a few hard rules.
 
-- La presenza non si persiste.
-- La configurazione del sensore si puo` persistere.
-- I burst reali valgono piu` della discovery fallita.
-- Il bootstrap non deve generare traffico inutile che altera il sensore.
-- Il LED locale e` solo una vista dello stato interno, non una sorgente di stato.
+- Presence is not persisted.
+- Sensor configuration can be persisted.
+- Real bursts matter more than failed discovery.
+- Bootstrap must not generate useless traffic that alters the sensor.
+- The local LED is only a view of internal state, not a source of state.
 
-Se rompi una di queste regole, il progetto continua a compilare ma smette di
-essere affidabile.
+If you break one of these rules, the project may still compile, but it stops
+being trustworthy.
 
-## Perche` esiste l'endpoint locale
+## Why the local endpoint exists
 
-Lo stack Zigbee inoltra certi callback solo se sul coordinator esiste davvero
-il cluster lato giusto. Per questo il probe registra un endpoint locale con i
-cluster client necessari.
+The Zigbee stack forwards some callbacks only if the coordinator really exposes
+the cluster on the correct side. That is why the probe registers a local
+endpoint with the required client clusters.
 
-Non e` estetica architetturale. E` una tassa d'ingresso imposta dallo stack.
-Se non lo fai, il traffico puo` esistere in aria ma non esistere per il tuo
+This is not architectural aesthetics. It is an entry tax imposed by the stack.
+If you do not do it, traffic may exist on the air and still not exist for your
 software.
 
-## Il caso HU presence
+## The HU presence case
 
-La milestone congelata in questo repo e` quella del sensore HU presence Zigbee.
+The milestone frozen in this repo is the HU presence Zigbee sensor.
 
-Le osservazioni importanti sono state queste:
+The important observations were these:
 
-- i burst `EF00` arrivano davvero
-- il device puo` cambiare `short_addr`
-- `zb_discover` puo` fallire anche quando il sensore e` vivo
-- `PRESENT` e `CLEAR` si vedono bene solo se il software resta passivo e non
-  reinventa lo stato al boot
+- `EF00` bursts do arrive
+- the device can change `short_addr`
+- `zb_discover` can fail even while the sensor is alive
+- `PRESENT` and `CLEAR` are observed correctly only if the software stays
+  passive and does not reinvent state at boot
 
-Il backend ha quindi smesso di inseguire un device ideale e ha iniziato a
-seguire il traffico reale.
+So the backend stopped chasing an ideal device and started following real
+traffic.
 
-## Persistenza: cosa si salva, cosa no
+## Persistence: what is saved, what is not
 
-Si salva:
+Saved:
 
 - `short_addr`
 - `endpoint`
 - `kind`
 - `cluster_id`
 - `has_vendor_cluster`
-- campi stabili del contesto IAS
+- stable IAS context fields
 
-Non si salva:
+Not saved:
 
 - `occupancy_known`
 - `occupied`
 - `zone_status`
 
-Questa separazione e` il cuore del progetto. Senza questa separazione il probe
-diventa un autore di fiction.
+This separation is the heart of the project. Without it, the probe becomes a
+writer of fiction.
 
-## LED come strumento di debug
+## LED as a debugging instrument
 
-Il LED onboard della `ESP32-C6-Zero` non e` un effetto UI. E` uno strumento di
-debug immediato.
+The onboard LED of the `ESP32-C6-Zero` is not a UI effect. It is an immediate
+debugging instrument.
 
 - `unknown` -> spento
 - `CLEAR` -> bianco
 - `PRESENT` -> viola
 
-La board e` stata verificata con mapping `RGB`, non `GRB`. Questo dettaglio
-sembra banale finche` non chiedi il viola e ottieni turchese. In quel momento
-capisci che l'hardware ti sta dicendo la verita` sul formato byte prima ancora
-dei log.
+The board was validated with `RGB` mapping, not `GRB`. This detail looks
+trivial until you ask for purple and get turquoise. At that moment you realize
+the hardware is telling the truth about byte order before the logs do.
 
 Board reference: [Waveshare ESP32-C6-Zero](https://www.waveshare.com/wiki/ESP32-C6-Zero?srsltid=AfmBOopFxMjO_4ma8wf0lXDpBSiPipDySdWLvjq7NPo_uu-O3YDNXeze)
 
-## File che contano
+## The files that matter
 
 - `main/app_main.c`
-  bootstrap NVS, piattaforma Zigbee, avvio del task principale
+  NVS bootstrap, Zigbee platform setup, main task startup
 - `main/zb_coordinator.c`
-  rete, segnali dello stack, raw handler `EF00`, wiring dei callback Zigbee
+  network, stack signals, raw `EF00` handler, Zigbee callback wiring
 - `main/zb_presence.c`
-  modello del sensore, discovery, bind, parsing dei DP vendor, persistenza del
-  contesto, transizioni di stato
+  sensor model, discovery, bind, vendor DP parsing, context persistence, state
+  transitions
 - `main/presence_led.c`
-  traduzione dello stato software in feedback locale sul LED
+  translation of software state into local LED feedback
 
-## Cosa non e`
+## What it is not
 
-Non e` ancora il firmware del display e-ink.
-Non e` un prodotto finito.
-Non e` una libreria generica per qualunque sensore Zigbee.
+It is not yet the e-ink display firmware.
+It is not a finished product.
+It is not a generic library for any Zigbee sensor.
 
-E` una base isolata, utile proprio perche` riduce il mondo a una sola domanda:
+It is an isolated base, useful precisely because it reduces the world to a
+single question:
 
-"questo sensore sta dicendo che c'e` una persona, oppure no?"
+"is this sensor saying there is a person, or not?"
 
-Finche` questa domanda non e` banale e affidabile qui, non ha senso integrarla
-nel resto.
+Until that question becomes boring and reliable here, integrating it into the
+rest makes no sense.
