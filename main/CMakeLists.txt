@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "presence_led.c"
+        "telegram_notifier.c"
         "zb_cli.c"
         "zb_coordinator.c"
         "zb_presence.c"
@@ -9,6 +10,13 @@ idf_component_register(
         "."
     REQUIRES
         console
+        esp_coex
+        esp_event
+        esp_http_client
+        esp_netif
+        esp_timer
+        esp_wifi
         led_strip
+        mbedtls
         nvs_flash
 )

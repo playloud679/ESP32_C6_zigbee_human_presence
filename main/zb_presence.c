@@ -14,6 +14,7 @@
 #include "zdo/esp_zigbee_zdo_command.h"
 
 #include "presence_led.h"
+#include "telegram_notifier.h"
 #include "zb_coordinator.h"
 
 static const char *TAG = "zb_probe_presence";
@@ -71,6 +72,59 @@ static const char *sensor_kind_to_string(zb_sensor_kind_t kind)
     default:
         return "none";
     }
+}
+
+static const char *vendor_dp_name(uint8_t dp_id)
+{
+    switch (dp_id) {
+    case 0x01:
+        return "presence";
+    case 0x02:
+        return "sensitivity";
+    case 0x04:
+        return "hold_s";
+    case 0x66:
+        return "fading_s";
+    case 0x6b:
+        return "small_move";
+    case 0x79:
+        return "distance_cm";
+    case 0x7a:
+        return "large_move";
+    case 0x7b:
+        return "motion_state";
+    case 0x7c:
+        return "target_count";
+    default:
+        return NULL;
+    }
+}
+
+static void log_vendor_dp_human(uint8_t dp_id, uint32_t value)
+{
+    const char *name = vendor_dp_name(dp_id);
+
+    if (!name) {
+        ESP_LOGI(TAG, "EF00 dp=0x%02x value=%" PRIu32, dp_id, value);
+        return;
+    }
+
+    if (dp_id == 0x01U) {
+        ESP_LOGI(TAG, "EF00 %-12s %s", name, value ? "PRESENT" : "CLEAR");
+        return;
+    }
+
+    ESP_LOGI(TAG, "EF00 %-12s %" PRIu32, name, value);
+}
+
+static bool vendor_dp_changed(const vendor_dp_entry_t *entry, uint8_t dp_type,
+                              uint16_t dp_len, uint32_t value)
+{
+    if (!entry->valid) {
+        return true;
+    }
+
+    return entry->type != dp_type || entry->len != dp_len || entry->value != value;
 }
 
 static bool ieee_addr_is_zero(const esp_zb_ieee_addr_t ieee_addr)
@@ -239,6 +293,10 @@ static bool cluster_present_in_inputs(const esp_zb_af_simple_desc_1_1_t *simple_
 
 static void log_cluster_list(const esp_zb_af_simple_desc_1_1_t *simple_desc)
 {
+    if (!zb_log_is_verbose()) {
+        return;
+    }
+
     for (uint8_t i = 0; i < simple_desc->app_input_cluster_count; ++i) {
         ESP_LOGI(TAG, "  in_cluster[%u]=0x%04hx", i, simple_desc->app_cluster_list[i]);
     }
@@ -246,6 +304,20 @@ static void log_cluster_list(const esp_zb_af_simple_desc_1_1_t *simple_desc)
         uint8_t idx = simple_desc->app_input_cluster_count + i;
         ESP_LOGI(TAG, "  out_cluster[%u]=0x%04hx", i, simple_desc->app_cluster_list[idx]);
     }
+}
+
+static bool update_presence_state(bool occupied)
+{
+    bool changed = !s_sensor.occupancy_known || s_sensor.occupied != occupied;
+
+    s_sensor.occupancy_known = true;
+    s_sensor.occupied = occupied;
+    presence_led_set_state(occupied);
+    if (changed) {
+        ESP_LOGI(TAG, "Presence state -> %s", occupied ? "PRESENT" : "CLEAR");
+        telegram_notifier_notify_presence(occupied);
+    }
+    return changed;
 }
 
 static void configure_occupancy_reporting(uint16_t short_addr, uint8_t endpoint)
@@ -295,7 +367,9 @@ static void bind_cluster(uint16_t short_addr, uint8_t endpoint, uint16_t cluster
     bind_req.dst_endp = ZB_PROBE_ENDPOINT;
     bind_req.req_dst_addr = short_addr;
 
-    ESP_LOGI(TAG, "Bind %s cluster short=0x%04hx ep=%u", cluster_name, short_addr, endpoint);
+    if (zb_log_is_verbose()) {
+        ESP_LOGI(TAG, "Bind %s cluster short=0x%04hx ep=%u", cluster_name, short_addr, endpoint);
+    }
     esp_zb_zdo_device_bind_req(&bind_req, NULL, NULL);
 }
 
@@ -326,9 +400,11 @@ static void send_vendor_query(uint8_t attempt)
     cmd_req.data.value = NULL;
 
     tsn = esp_zb_zcl_custom_cluster_cmd_req(&cmd_req);
-    ESP_LOGI(TAG,
-             "Sent EF00 query attempt=%u short=0x%04hx ep=%u cmd=0x%02x tsn=0x%02x",
-             attempt, s_sensor.short_addr, s_sensor.endpoint, ZB_VENDOR_QUERY_CMD_ID, tsn);
+    if (zb_log_is_verbose()) {
+        ESP_LOGI(TAG,
+                 "Sent EF00 query attempt=%u short=0x%04hx ep=%u cmd=0x%02x tsn=0x%02x",
+                 attempt, s_sensor.short_addr, s_sensor.endpoint, ZB_VENDOR_QUERY_CMD_ID, tsn);
+    }
 }
 
 static void vendor_query_cb(uint8_t param)
@@ -347,11 +423,13 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status,
         return;
     }
 
-    ESP_LOGI(TAG,
-             "Endpoint %u profile=0x%04hx device=0x%04hx in=%u out=%u",
-             simple_desc->endpoint, simple_desc->app_profile_id,
-             simple_desc->app_device_id, simple_desc->app_input_cluster_count,
-             simple_desc->app_output_cluster_count);
+    if (zb_log_is_verbose()) {
+        ESP_LOGI(TAG,
+                 "Endpoint %u profile=0x%04hx device=0x%04hx in=%u out=%u",
+                 simple_desc->endpoint, simple_desc->app_profile_id,
+                 simple_desc->app_device_id, simple_desc->app_input_cluster_count,
+                 simple_desc->app_output_cluster_count);
+    }
     log_cluster_list(simple_desc);
 
     if (!cluster_present_in_inputs(simple_desc, ZB_OCCUPANCY_CLUSTER_ID) &&
@@ -369,21 +447,25 @@ static void simple_desc_cb(esp_zb_zdp_status_t zdo_status,
     if (cluster_present_in_inputs(simple_desc, ZB_OCCUPANCY_CLUSTER_ID)) {
         s_sensor.kind = ZB_SENSOR_KIND_OCCUPANCY;
         s_sensor.cluster_id = ZB_OCCUPANCY_CLUSTER_ID;
-        ESP_LOGI(TAG, "Occupancy sensor candidate short=0x%04hx ep=%u",
-                 s_sensor.short_addr, s_sensor.endpoint);
+        ESP_LOGI(TAG, "Sensor discovered short=0x%04hx ep=%u kind=occupancy ef00=%s",
+                 s_sensor.short_addr, s_sensor.endpoint,
+                 s_sensor.has_vendor_cluster ? "yes" : "no");
         bind_cluster(s_sensor.short_addr, s_sensor.endpoint, ZB_OCCUPANCY_CLUSTER_ID, "occupancy");
         configure_occupancy_reporting(s_sensor.short_addr, s_sensor.endpoint);
     } else if (cluster_present_in_inputs(simple_desc, ZB_IAS_ZONE_CLUSTER_ID)) {
         s_sensor.kind = ZB_SENSOR_KIND_IAS_ZONE;
         s_sensor.cluster_id = ZB_IAS_ZONE_CLUSTER_ID;
-        ESP_LOGI(TAG, "IAS Zone sensor candidate short=0x%04hx ep=%u",
-                 s_sensor.short_addr, s_sensor.endpoint);
+        ESP_LOGI(TAG, "Sensor discovered short=0x%04hx ep=%u kind=ias_zone ef00=%s",
+                 s_sensor.short_addr, s_sensor.endpoint,
+                 s_sensor.has_vendor_cluster ? "yes" : "no");
         bind_cluster(s_sensor.short_addr, s_sensor.endpoint, ZB_IAS_ZONE_CLUSTER_ID, "ias_zone");
     }
 
     if (s_sensor.has_vendor_cluster) {
-        ESP_LOGI(TAG, "EF00 vendor cluster detected on short=0x%04hx ep=%u; scheduling queries",
-                 s_sensor.short_addr, s_sensor.endpoint);
+        if (zb_log_is_verbose()) {
+            ESP_LOGI(TAG, "EF00 vendor cluster detected on short=0x%04hx ep=%u; scheduling queries",
+                     s_sensor.short_addr, s_sensor.endpoint);
+        }
         esp_zb_scheduler_alarm(vendor_query_cb, 1, ZB_VENDOR_QUERY_DELAY_MS);
         esp_zb_scheduler_alarm(vendor_query_cb, 2, ZB_VENDOR_QUERY_RETRY_DELAY_MS);
     }
@@ -402,7 +484,9 @@ static void active_ep_cb(esp_zb_zdp_status_t zdo_status, uint8_t ep_count,
         return;
     }
 
-    ESP_LOGI(TAG, "Device 0x%04hx exposes %u endpoint(s)", short_addr, ep_count);
+    if (zb_log_is_verbose()) {
+        ESP_LOGI(TAG, "Device 0x%04hx exposes %u endpoint(s)", short_addr, ep_count);
+    }
     for (uint8_t i = 0; i < ep_count; ++i) {
         esp_zb_zdo_simple_desc_req_param_t req = {
             .addr_of_interest = short_addr,
@@ -460,17 +544,20 @@ void zb_presence_note_vendor_dp(uint16_t short_addr, uint8_t endpoint, uint8_t d
 
     if (dp_id == 0x01U) {
         present_state = value != 0U;
-        s_sensor.occupancy_known = true;
-        s_sensor.occupied = present_state;
-        presence_led_set_state(present_state);
+        update_presence_state(present_state);
     }
 
     snapshot = vendor_snapshot_for_state(present_state);
+    bool changed = vendor_dp_changed(&snapshot->entries[dp_id], dp_type, dp_len, value);
     snapshot->captured = true;
     snapshot->entries[dp_id].valid = true;
     snapshot->entries[dp_id].type = dp_type;
     snapshot->entries[dp_id].len = dp_len;
     snapshot->entries[dp_id].value = value;
+
+    if (changed || zb_log_is_verbose()) {
+        log_vendor_dp_human(dp_id, value);
+    }
 }
 
 esp_err_t zb_presence_print_vendor_diff(void)
@@ -532,10 +619,8 @@ esp_err_t zb_presence_handle_report(const esp_zb_zcl_report_attr_message_t *mess
     s_sensor.endpoint = message->src_endpoint;
     s_sensor.cluster_id = ZB_OCCUPANCY_CLUSTER_ID;
     s_sensor.kind = ZB_SENSOR_KIND_OCCUPANCY;
-    s_sensor.occupancy_known = true;
-    s_sensor.occupied = occupied;
+    update_presence_state(occupied);
     persist_sensor_cfg();
-    presence_led_set_state(occupied);
 
     ESP_LOGI(TAG,
              "OCCUPANCY short=0x%04hx ep=%u raw=0x%02x state=%s",
@@ -651,12 +736,10 @@ esp_err_t zb_presence_handle_ias_status_change(const esp_zb_zcl_ias_zone_status_
     s_sensor.cluster_id = ZB_IAS_ZONE_CLUSTER_ID;
     s_sensor.kind = ZB_SENSOR_KIND_IAS_ZONE;
     s_sensor.commissioned = true;
-    s_sensor.occupancy_known = true;
-    s_sensor.occupied = occupied;
+    update_presence_state(occupied);
     s_sensor.zone_status = message->zone_status;
     s_sensor.zone_id = message->zone_id;
     persist_sensor_cfg();
-    presence_led_set_state(occupied);
 
     ESP_LOGI(TAG,
              "IAS STATUS short=0x%04hx ep=%u zone_status=0x%04hx zone_id=%u state=%s",

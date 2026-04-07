@@ -22,6 +22,17 @@
 #include "zb_presence.h"
 
 static const char *TAG = "zb_probe_coord";
+static bool s_verbose_logs;
+
+void zb_log_set_verbose(bool verbose)
+{
+    s_verbose_logs = verbose;
+}
+
+bool zb_log_is_verbose(void)
+{
+    return s_verbose_logs;
+}
 
 static const char *tuya_dp_type_to_string(uint8_t type)
 {
@@ -83,6 +94,11 @@ static void log_tuya_dp_records(uint16_t short_addr, uint8_t src_endpoint,
 
         zb_presence_note_vendor_dp(short_addr, src_endpoint, dp_id, dp_type, dp_len, dp_value);
 
+        if (!s_verbose_logs) {
+            offset = (uint16_t)(offset + 6U + dp_len);
+            continue;
+        }
+
         if (dp_type == 0x01 && dp_len == 1U) {
             ESP_LOGI(TAG,
                      "RAW EF00 dp seq=0x%04x dp=0x%02x type=%s len=%u value=%u",
@@ -99,7 +115,7 @@ static void log_tuya_dp_records(uint16_t short_addr, uint8_t src_endpoint,
             ESP_LOGI(TAG,
                      "RAW EF00 dp seq=0x%04x dp=0x%02x type=%s len=%u value=%u",
                      seq, dp_id, tuya_dp_type_to_string(dp_type), dp_len, dp_value[0]);
-        } else {
+        } else if (s_verbose_logs) {
             char value_hex[3 * 32 + 1];
             uint16_t used = dp_len > 32U ? 32U : dp_len;
             bytes_to_hex_string(dp_value, used, value_hex, sizeof(value_hex));
@@ -139,15 +155,17 @@ static bool zb_raw_command_handler(uint8_t bufid)
         return false;
     }
 
-    ESP_LOGI(TAG,
-             "RAW EF00 short=0x%04hx src_ep=%u dst_ep=%u profile=0x%04hx cmd=0x%02x len=%u manuf=%u",
-             cmd_info->addr_data.common_data.source.u.short_addr,
-             cmd_info->addr_data.common_data.src_endpoint,
-             cmd_info->addr_data.common_data.dst_endpoint,
-             cmd_info->profile_id,
-             cmd_info->cmd_id,
-             payload_len,
-             cmd_info->is_manuf_specific ? cmd_info->manuf_specific : 0);
+    if (s_verbose_logs) {
+        ESP_LOGI(TAG,
+                 "RAW EF00 short=0x%04hx src_ep=%u dst_ep=%u profile=0x%04hx cmd=0x%02x len=%u manuf=%u",
+                 cmd_info->addr_data.common_data.source.u.short_addr,
+                 cmd_info->addr_data.common_data.src_endpoint,
+                 cmd_info->addr_data.common_data.dst_endpoint,
+                 cmd_info->profile_id,
+                 cmd_info->cmd_id,
+                 payload_len,
+                 cmd_info->is_manuf_specific ? cmd_info->manuf_specific : 0);
+    }
 
     zb_presence_note_vendor_cluster(cmd_info->addr_data.common_data.source.u.short_addr,
                                     cmd_info->addr_data.common_data.src_endpoint);
@@ -156,8 +174,10 @@ static bool zb_raw_command_handler(uint8_t bufid)
         char hex[3 * 64 + 1];
         uint16_t used = payload_len > 64 ? 64 : payload_len;
         bytes_to_hex_string(payload, used, hex, sizeof(hex));
-        ESP_LOGI(TAG, "RAW EF00 payload[%u]=%s%s",
-                 used, hex, payload_len > used ? " ..." : "");
+        if (s_verbose_logs) {
+            ESP_LOGI(TAG, "RAW EF00 payload[%u]=%s%s",
+                     used, hex, payload_len > used ? " ..." : "");
+        }
         log_tuya_dp_records(cmd_info->addr_data.common_data.source.u.short_addr,
                             cmd_info->addr_data.common_data.src_endpoint,
                             payload, payload_len);

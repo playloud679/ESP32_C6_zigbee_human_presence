@@ -3,6 +3,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "esp_console.h"
 #include "esp_err.h"
@@ -10,6 +11,7 @@
 #include "esp_zigbee_core.h"
 #include "platform/esp_zigbee_platform.h"
 
+#include "telegram_notifier.h"
 #include "zb_coordinator.h"
 #include "zb_presence.h"
 
@@ -187,6 +189,113 @@ static int cmd_zb_factory_reset(int argc, char **argv)
     return 0;
 }
 
+static int cmd_tg_status(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    telegram_notifier_print_status();
+    return 0;
+}
+
+static int cmd_tg_wifi(int argc, char **argv)
+{
+    esp_err_t err;
+
+    if (argc != 3) {
+        printf("usage: tg_wifi <ssid> <password>\n");
+        return 1;
+    }
+
+    err = telegram_notifier_set_wifi(argv[1], argv[2]);
+    printf("tg_wifi err=%s\n", esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_tg_chat(int argc, char **argv)
+{
+    esp_err_t err;
+
+    if (argc != 3) {
+        printf("usage: tg_chat <bot_token> <chat_id>\n");
+        return 1;
+    }
+
+    err = telegram_notifier_set_chat(argv[1], argv[2]);
+    printf("tg_chat err=%s\n", esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_tg_scan(int argc, char **argv)
+{
+    esp_err_t err;
+
+    (void)argc;
+    (void)argv;
+    err = telegram_notifier_scan_wifi();
+    printf("tg_scan err=%s\n", esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_tg_wifi_pick(int argc, char **argv)
+{
+    esp_err_t err;
+    size_t index;
+
+    if (argc != 3) {
+        printf("usage: tg_wifi_pick <index> <password>\n");
+        return 1;
+    }
+
+    index = (size_t)strtoul(argv[1], NULL, 0);
+    err = telegram_notifier_set_wifi_by_index(index, argv[2]);
+    printf("tg_wifi_pick index=%u err=%s\n", (unsigned)index, esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_tg_test(int argc, char **argv)
+{
+    esp_err_t err;
+
+    (void)argc;
+    (void)argv;
+    err = telegram_notifier_send_test();
+    printf("tg_test err=%s\n", esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_tg_reset(int argc, char **argv)
+{
+    esp_err_t err;
+
+    (void)argc;
+    (void)argv;
+    err = telegram_notifier_reset();
+    printf("tg_reset err=%s\n", esp_err_to_name(err));
+    return err == ESP_OK ? 0 : 1;
+}
+
+static int cmd_log_mode(int argc, char **argv)
+{
+    if (argc != 2) {
+        printf("usage: log_mode <normal|verbose>\n");
+        printf("current=%s\n", zb_log_is_verbose() ? "verbose" : "normal");
+        return 1;
+    }
+
+    if (strcmp(argv[1], "verbose") == 0) {
+        zb_log_set_verbose(true);
+    } else if (strcmp(argv[1], "normal") == 0) {
+        zb_log_set_verbose(false);
+    } else {
+        printf("unknown mode: %s\n", argv[1]);
+        return 1;
+    }
+
+    printf("log_mode=%s\n", zb_log_is_verbose() ? "verbose" : "normal");
+    return 0;
+}
+
 static void register_command(const char *command, const char *help,
                              const char *hint, esp_console_cmd_func_t func)
 {
@@ -221,6 +330,14 @@ void zb_cli_start(void)
     register_command("zb_query", "Send EF00 vendor status query", NULL, cmd_zb_query);
     register_command("zb_diff", "Show EF00 differences between CLEAR and PRESENT", NULL, cmd_zb_diff);
     register_command("zb_factory_reset", "Erase Zigbee storage and restart", NULL, cmd_zb_factory_reset);
+    register_command("tg_status", "Show Telegram notifier status", NULL, cmd_tg_status);
+    register_command("tg_scan", "Scan Wi-Fi networks visible to the probe", NULL, cmd_tg_scan);
+    register_command("tg_wifi", "Set Telegram Wi-Fi credentials", "<ssid> <password>", cmd_tg_wifi);
+    register_command("tg_wifi_pick", "Pick Wi-Fi from last scan by index", "<index> <password>", cmd_tg_wifi_pick);
+    register_command("tg_chat", "Set Telegram bot token and chat id", "<bot_token> <chat_id>", cmd_tg_chat);
+    register_command("tg_test", "Send a Telegram test message", NULL, cmd_tg_test);
+    register_command("tg_reset", "Clear Telegram Wi-Fi and bot config", NULL, cmd_tg_reset);
+    register_command("log_mode", "Set human log mode", "<normal|verbose>", cmd_log_mode);
 
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
     esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();

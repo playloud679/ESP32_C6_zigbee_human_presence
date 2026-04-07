@@ -1,155 +1,123 @@
-# ESP32_C6_zigbee_human_presence
+# zigbee_presence_probe_c6
 
-This is not an application firmware. It is a minimal backend disguised as an
-embedded probe.
+Mini progetto ESP-IDF per validare il trigger Zigbee presenza su `ESP32-C6`
+prima di integrarlo nel firmware del display e-ink.
 
-The `ESP32-C6` runs as a Zigbee coordinator and observes one problem only:
-understanding when an HU presence sensor enters and leaves the human-detected
-state, without the noise of everything else. No cloud. No final display. No
-decorative automation. Just network, state, logs, and a local LED that tells
-the truth if the software knows it.
+## Obiettivo
 
-## Idea
+Il probe fa tre cose:
 
-The sensor should not be treated as an elegant device exposing a clean,
-orthodox ZCL model. It should be treated as a node that can:
+1. Avvia l'`ESP32-C6` come coordinator Zigbee.
+2. Accetta il join di un sensore presenza.
+3. Cerca un endpoint che esponga il cluster `Occupancy Sensing` (`0x0406`),
+   prova a fare bind + configure reporting e stampa a seriale i cambi di stato.
 
-- speak standard when it feels like it
-- speak vendor when that is more useful
-- change `short_addr`
-- ignore ZDO discovery while still transmitting useful bursts
+Non scarica Blynk e non aggiorna il display: serve solo a validare il trigger.
 
-So the software does not begin with "what spec does the device claim to
-implement", but with "what is the most reliable source of truth right now".
+## Struttura
 
-In this project the source of truth is, in practical order:
+- `main/app_main.c`: bootstrap NVS + piattaforma Zigbee.
+- `main/zb_coordinator.c`: formazione rete, endpoint locale, segnali stack.
+- `main/zb_presence.c`: discovery endpoint, bind, configure reporting, log occupancy.
 
-1. real `EF00` bursts
-2. `IAS Zone` notifications
-3. standard `Occupancy` reports
-4. discovery and metadata, but only as context, not as operational truth
+## Build
 
-## Modello mentale
+Prerequisiti:
 
-The system has three distinct layers.
+- `ESP-IDF` installato.
+- accesso Internet al primo build per scaricare `esp-zboss-lib` e `esp-zigbee-lib`.
 
-`Rete`
+Esempio:
 
-The coordinator forms or reopens the Zigbee network, registers a local
-endpoint, and puts itself in a position to receive traffic that the stack
-would otherwise discard.
+```sh
+. "$HOME/esp/esp-idf/export.sh"
+cd zigbee_presence_probe_c6
+idf.py set-target esp32c6
+idf.py build
+idf.py -p /dev/cu.usbmodemXXXX flash monitor
+```
 
-`Contesto device`
+## Flusso atteso a seriale
 
-The software keeps a small in-memory model of the current sensor: short
-address, endpoint, logical type, observed cluster, presence of vendor cluster
-`0xEF00`, and a few IAS metadata fields.
+Dopo il flash dovresti vedere:
 
-This context is persisted only in its stable part. Not for convenience, but to
-avoid lying to itself after a reboot.
+- formazione rete coordinator
+- `permit join`
+- `device announce`
+- ricerca endpoint
+- individuazione cluster `0x0406`
+- log tipo `OCCUPANCY ... state=PRESENT` o `state=CLEAR`
 
-`Stato presenza`
+## CLI seriale
 
-`PRESENT` and `CLEAR` are not configuration. They are pure runtime.
-If you persist them, you introduce memory where there should be observation.
-As soon as you make that mistake, the system can come back already in
-`PRESENT`, which is exactly the thing a presence sensor must never invent.
+Il probe espone anche una piccola CLI con prompt `zb>`.
 
-## Invariants
+Comandi utili:
 
-This repo lives on a few hard rules.
+- `help`
+- `zb_status`
+- `zb_open 180`
+- `zb_close`
+- `zb_sensor`
+- `zb_discover 0x1234`
+- `zb_bind`
+- `zb_report`
+- `zb_factory_reset`
+- `tg_status`
+- `tg_scan`
+- `tg_wifi "SSID" "PASSWORD"`
+- `tg_wifi_pick <index> "<PASSWORD>"`
+- `tg_chat "<BOT_TOKEN>" "<CHAT_ID>"`
+- `tg_test`
+- `tg_reset`
 
-- Presence is not persisted.
-- Sensor configuration can be persisted.
-- Real bursts matter more than failed discovery.
-- Bootstrap must not generate useless traffic that alters the sensor.
-- The local LED is only a view of internal state, not a source of state.
+Uso tipico:
 
-If you break one of these rules, the project may still compile, but it stops
-being trustworthy.
+1. fai partire il coordinator
+2. apri la rete con `zb_open 180`
+3. fai joinare il sensore
+4. se serve, rilancia discovery manuale con `zb_discover 0xSHORT`
+5. forza `zb_bind` e `zb_report`
+6. osserva i log `OCCUPANCY ...`
 
-## Why the local endpoint exists
+## Telegram
 
-The Zigbee stack forwards some callbacks only if the coordinator really exposes
-the cluster on the correct side. That is why the probe registers a local
-endpoint with the required client clusters.
+Il probe puo` anche inoltrare a Telegram i cambi di stato presenza.
 
-This is not architectural aesthetics. It is an entry tax imposed by the stack.
-If you do not do it, traffic may exist on the air and still not exist for your
-software.
+Configurazione minima:
 
-## The HU presence case
+1. opzionale: fai `tg_scan` per vedere gli SSID rilevati dal probe
+2. imposta il Wi-Fi con `tg_wifi "SSID" "PASSWORD"` oppure `tg_wifi_pick <index> "<PASSWORD>"`
+3. imposta bot e destinazione con `tg_chat "<BOT_TOKEN>" "<CHAT_ID>"`
+4. verifica con `tg_test`
+5. controlla lo stato con `tg_status`
 
-The milestone frozen in this repo is the HU presence Zigbee sensor.
+Comportamento:
 
-The important observations were these:
+- invia solo sui veri cambi di stato: `PRESENT` e `CLEAR`
+- le credenziali restano in NVS, quindi sopravvivono al reboot
+- il Wi-Fi viene usato on-demand per scan o invio, poi viene disconnesso per non
+  interferire stabilmente con Zigbee sul radio shared del `ESP32-C6`
+- se l'orario di sistema non e` valido usa come fallback il tempo dal boot
+- `tg_reset` cancella tutta la configurazione Telegram/Wi-Fi del notifier
 
-- `EF00` bursts do arrive
-- the device can change `short_addr`
-- `zb_discover` can fail even while the sensor is alive
-- `PRESENT` and `CLEAR` are observed correctly only if the software stays
-  passive and does not reinvent state at boot
+## Changelog
 
-So the backend stopped chasing an ideal device and started following real
-traffic.
+- aggiunto notifier Telegram con configurazione persistente in NVS
+- aggiunti comandi `tg_scan` e `tg_wifi_pick` per scegliere il Wi-Fi dal radio del probe
+- abilitata la coesistenza `Wi-Fi + Zigbee` con `esp_coex_wifi_i154_enable()`
+- stabilizzato il notifier usando Wi-Fi on-demand, senza tenere la STA sempre associata
+- validato il flusso completo `PRESENT/CLEAR -> Telegram` su hardware reale
 
-## Persistence: what is saved, what is not
+## Note
 
-Saved:
-
-- `short_addr`
-- `endpoint`
-- `kind`
-- `cluster_id`
-- `has_vendor_cluster`
-- stable IAS context fields
-
-Not saved:
-
-- `occupancy_known`
-- `occupied`
-- `zone_status`
-
-This separation is the heart of the project. Without it, the probe becomes a
-writer of fiction.
-
-## LED as a debugging instrument
-
-The onboard LED of the `ESP32-C6-Zero` is not a UI effect. It is an immediate
-debugging instrument.
-
-- `unknown` -> spento
-- `CLEAR` -> bianco
-- `PRESENT` -> viola
-
-The board was validated with `RGB` mapping, not `GRB`. This detail looks
-trivial until you ask for purple and get turquoise. At that moment you realize
-the hardware is telling the truth about byte order before the logs do.
-
-Board reference: [Waveshare ESP32-C6-Zero](https://www.waveshare.com/wiki/ESP32-C6-Zero?srsltid=AfmBOopFxMjO_4ma8wf0lXDpBSiPipDySdWLvjq7NPo_uu-O3YDNXeze)
-
-## The files that matter
-
-- `main/app_main.c`
-  NVS bootstrap, Zigbee platform setup, main task startup
-- `main/zb_coordinator.c`
-  network, stack signals, raw `EF00` handler, Zigbee callback wiring
-- `main/zb_presence.c`
-  sensor model, discovery, bind, vendor DP parsing, context persistence, state
-  transitions
-- `main/presence_led.c`
-  translation of software state into local LED feedback
-
-## What it is not
-
-It is not yet the e-ink display firmware.
-It is not a finished product.
-It is not a generic library for any Zigbee sensor.
-
-It is an isolated base, useful precisely because it reduces the world to a
-single question:
-
-"is this sensor saying there is a person, or not?"
-
-Until that question becomes boring and reliable here, integrating it into the
-rest makes no sense.
+- Il progetto usa un endpoint locale con cluster `Occupancy Sensing` lato client,
+  perche` l'SDK inoltra il `REPORT_ATTR` al callback solo se il cluster esiste
+  sul nostro endpoint.
+- Su `ESP32-C6`, la coesistenza `Wi-Fi + Zigbee` va abilitata esplicitamente:
+  senza `esp_coex_wifi_i154_enable()` il Wi-Fi puo` risultare instabile oppure
+  restituire scan vuoti con Zigbee gia` attivo.
+- In alcuni reboot o dopo variazioni di rete puo` essere necessario rilanciare
+  `zb_bind` per riallineare il reporting del sensore.
+- Il sensore reale potrebbe richiedere ritocchi su `bind` o `configure reporting`
+  a seconda del vendor. Questo scaffold e` pensato per essere la base del test.
